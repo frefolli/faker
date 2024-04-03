@@ -29,15 +29,9 @@ Database NewDatabase(uint32_t length) {
 }
 
 int main(int argc, char** args) {
+    std::srand(std::time(0));
     Database db = NewDatabase(1000000);
     RandomizeDatabase(db);
+    WriteDatabase(db, "faker-data.bin");
     FreeDatabase(db);
-  
-    std::srand(std::time(0));
-    std::cout << RandomFLOAT32T(0, 1) << std::endl;
-    std::cout << RandomFLOAT32T(0, 1) << std::endl;
-    std::cout << RandomFLOAT32T(0, 1) << std::endl;
-    std::cout << RandomFLOAT32T(0, 1) << std::endl;
-    std::cout << RandomFLOAT32T(0, 1) << std::endl;
-    std::cout << RandomFLOAT32T(0, 1) << std::endl;
 }
