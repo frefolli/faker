@@ -1,0 +1,9 @@
+include_dirs:
+    - include
+source_dirs:
+    - src
+links: []
+options:
+    - --std=c++17
+    - -O3
+builddir: builddir

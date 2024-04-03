@@ -1,0 +1,9 @@
+*.bin
+*.exe
+*.stackdump
+*.csv
+test
+*.ipynb
+.ipynb_checkpoints
+__pycache__
+builddir
