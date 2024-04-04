@@ -4,7 +4,6 @@
 #include <sigmod.hh>
 #include <iostream>
 #include <ctime>
-
 const uint32_t CATEGORIES = 1000;
 const float32_t X = 5;
 
@@ -75,13 +74,23 @@ QuerySet NewQuerySet(uint32_t length) {
 }
 
 int main(int argc, char** args) {
+    uint32_t DATABASE_LENGTH = 100000;
+    uint32_t QUERYSET_LENGTH = 1000;
     std::srand(std::time(0));
 
-    Database db = NewDatabase(1000000);
+    if (argc > 1) {
+        DATABASE_LENGTH = std::stoi(args[1]);
+    }
+
+    if (argc > 2) {
+        QUERYSET_LENGTH = std::stoi(args[2]);
+    }
+
+    Database db = NewDatabase(DATABASE_LENGTH);
     RandomizeDatabase(db);
     WriteDatabase(db, "faker-data.bin");
 
-    QuerySet qs = NewQuerySet(1000);
+    QuerySet qs = NewQuerySet(QUERYSET_LENGTH);
     CraftQuerySet(qs, db);
     WriteQuerySet(qs, "faker-queries.bin");
 
