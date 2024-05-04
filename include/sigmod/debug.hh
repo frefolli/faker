@@ -1,5 +1,5 @@
-#ifndef DEBUG_HH
-#define DEBUG_HH
+#ifndef SIGMOD_DEBUG_HH
+#define SIGMOD_DEBUG_HH
 
 #include <iostream>
 #include <string>

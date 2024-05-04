@@ -1,5 +1,5 @@
-#ifndef RANDOM_HH
-#define RANDOM_HH
+#ifndef SIGMOD_RANDOM_HH
+#define SIGMOD_RANDOM_HH
 
 #include <sigmod/config.hh>
 

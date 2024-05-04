@@ -1,5 +1,5 @@
-#ifndef RECORD_HH
-#define RECORD_HH
+#ifndef SIGMOD_RECORD_HH
+#define SIGMOD_RECORD_HH
 
 #include <ostream>
 #include <sigmod/config.hh>

@@ -1,5 +1,5 @@
-#ifndef QUERY_HH
-#define QUERY_HH
+#ifndef SIGMOD_QUERY_HH
+#define SIGMOD_QUERY_HH
 
 #include <ostream>
 #include <sigmod/config.hh>

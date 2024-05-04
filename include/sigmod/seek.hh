@@ -1,5 +1,5 @@
-#ifndef SEEK_HH
-#define SEEK_HH
+#ifndef SIGMOD_SEEK_HH
+#define SIGMOD_SEEK_HH
 
 #include <sigmod/record.hh>
 #include <iostream>

@@ -1,5 +1,5 @@
-#ifndef SCOREBOARD_HH
-#define SCOREBOARD_HH
+#ifndef SIGMOD_SCOREBOARD_HH
+#define SIGMOD_SCOREBOARD_HH
 
 #include <sigmod/config.hh>
 #include <sigmod/flags.hh>

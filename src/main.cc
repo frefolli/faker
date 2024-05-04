@@ -1,220 +1,285 @@
-#include <sigmod/query_set.hh>
 #include <sigmod/config.hh>
+#include <sigmod/query_set.hh>
 #include <sigmod/database.hh>
-#include <sigmod/metrics.hh>
 #include <sigmod/memory.hh>
-#include <sigmod/flags.hh>
 #include <sigmod/scoreboard.hh>
-#include <sigmod.hh>
+#include <sigmod/flags.hh>
 #include <omp.h>
 #include <algorithm>
 #include <cassert>
 
-struct Tree {
-  score_t* metrics;
-  uint32_t* indexes;
+struct Index {
+  uint32_t* indices;
   uint32_t length;
-  uint32_t start;
-  uint32_t end;
+
+  static Index* New(Database& db) {
+    uint32_t* indices = smalloc<uint32_t>(db.length);
+    for (uint32_t i = 0; i < db.length; i++) {
+      indices[i] = i;
+    }
+
+    return new Index {
+      .indices = indices,
+      .length = db.length
+    };
+  }
+
+  static void Free(Index* index) {
+    if (index != nullptr) {
+      sfree(index->indices);
+      index->indices = nullptr;
+      index->length = 0;
+      sfree(index);
+    }
+  }
 };
 
-inline bool IsNotLeaf(uint32_t node_start, uint32_t node_end) {
-  return (node_end - node_start > 2 * k_nearest_neighbors);
-}
+struct IndexPage {
+  Index** indexes;
+  uint32_t length;
 
-inline uint32_t GetMiddle(uint32_t node_start, uint32_t node_end) {
-  return (node_start + node_end) / 2;
-}
+  static IndexPage* New(Database& db) {
+    Index** indexes = smalloc<Index*>(vector_num_dimension);
 
-void BuildNode(Tree& tree, Database& db, uint32_t node_start, uint32_t node_end) {
-  if (IsNotLeaf(node_start, node_end)) {
-    uint32_t root = GetMiddle(node_start, node_end);
-    BuildNode(tree, db, node_start, root);
-    BuildNode(tree, db, root + 1, node_end);
-  } else {
-    std::sort(tree.indexes + node_start, tree.indexes + node_end,
-              [&tree, &db](const uint32_t&a, const uint32_t&b) {
-      return db.records[tree.start + a].T < db.records[tree.start + b].T;
+    #ifdef ENABLE_OMP
+      #pragma omp parallel for
+    #endif
+    for (uint32_t key = 0; key < vector_num_dimension; key++) {
+      indexes[key] = Index::New(db);
+    }
+
+    #ifdef ENABLE_OMP
+      #pragma omp parallel for
+    #endif
+    for (uint32_t key = 0; key < vector_num_dimension; key++) {
+      Index* index = indexes[key];
+      std::sort(index->indices, index->indices + index->length, [&key, &db](const uint32_t& a, const uint32_t& b) {
+        const Record& A = db.records[a];
+        const Record& B = db.records[b];
+        for (uint32_t j = key; j < vector_num_dimension; j++) {
+          const float32_t Aj = A.fields[j];
+          const float32_t Bj = B.fields[j];
+          if (Aj != Bj) {
+            return Aj < Bj;
+          }
+        }
+        for (uint32_t j = 0; j < key; j++) {
+          const float32_t Aj = A.fields[j];
+          const float32_t Bj = B.fields[j];
+          if (Aj != Bj) {
+            return Aj < Bj;
+          }
+        }
+        return a < b;
+      });
+    }
+
+    return new IndexPage {
+      .indexes = indexes,
+      .length = vector_num_dimension
+    };
+  }
+
+  static void Free(IndexPage* page) {
+    if (page != nullptr) {
+      for (uint32_t i = 0; i < page->length; i++) {
+        Index::Free(page->indexes[i]);
+      }
+      sfree(page->indexes);
+      sfree(page);
+    }
+  }
+};
+
+struct Links {
+  typedef std::pair<uint32_t, score_t> link_t;
+  link_t links[k_nearest_neighbors];
+  uint16_t length;
+
+  void clear() {
+    length = 0;
+  }
+
+  bool has(uint32_t index) const {
+    for (uint32_t i = 0; i < length; i++) {
+      if (links[i].first == index) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /* matches link_t.index == index */
+  const link_t& get(uint32_t index) const {
+    for (uint32_t i = 0; i < length; i++) {
+      if (links[i].first == index) {
+        return links[i];
+      }
+    }
+    throw std::out_of_range("index " + std::to_string(index) + " is not in Links");
+  }
+
+  /* returns links[pos] */
+  const link_t& at(uint32_t pos) const {
+    if (pos >= length) {
+      throw std::out_of_range("pos " + std::to_string(pos) + " is too large for Links");
+    }
+
+    return links[pos];
+  }
+
+  void write(uint32_t pos, uint32_t index, score_t score) {
+    links[pos] = {index, score};
+  }
+
+  void sort() {
+    std::sort(links, links + length, [](const link_t& a, const link_t& b) {
+      if (a.second != b.second) {
+        return a.second < b.second;
+      } else {
+        return a.first < b.first;
+      }
     });
   }
-}
 
-void BuildTree(Tree& tree, Database& db, uint32_t tree_start, uint32_t tree_end) {
-  uint32_t length = tree_end - tree_start;
-  tree = {
-    .metrics = smalloc<score_t>(length),
-    .indexes = smalloc<uint32_t>(length),
-    .length = length,
-    .start = tree_start,
-    .end = tree_end
-  };
-
-  #pragma omp parallel for
-  for (uint32_t i = 0; i < length; i++) {
-    #ifdef USE_FIRST_METRIC
-      tree.metrics[i] = first_metric(db.records[tree.start + i]);
-    #endif
-    #ifdef USE_SECOND_METRIC
-      tree.metrics[i] = second_metric(db.records[tree.start + i]);
-    #endif
-    tree.indexes[i] = i;
-  }
-
-  std::sort(tree.indexes, tree.indexes + length,
-            [&tree](const uint32_t&a, const uint32_t&b) {
-    return tree.metrics[a] < tree.metrics[b];
-  });
-
-  BuildNode(tree, db, 0, length);
-}
-
-inline void TryCandidate(Tree& tree, Database& db,
-                         Scoreboard& board, Query& query,
-                         uint32_t i) {
-  uint32_t index = tree.start + tree.indexes[i];
-  score_t score = distance(db.records[index], query);
-  board.push(index, score);
-}
-
-uint32_t TRESHOLD = 10 * k_nearest_neighbors;
-void SearchInNode(Tree& tree, Database& db,
-                  Scoreboard& board, uint32_t& evaluated,
-                  Query& query, score_t query_metric,
-                  uint32_t node_start, uint32_t node_end) {
-  if (IsNotLeaf(node_start, node_end)) {
-    uint32_t root = GetMiddle(node_start, node_end);
-    TryCandidate(tree, db, board, query, root);
-    evaluated++;
-
-    if (query_metric < tree.metrics[tree.indexes[root]]) {
-      SearchInNode(tree, db, board, evaluated, query, query_metric, node_start, root);
-      if (board.not_full() || evaluated < TRESHOLD) {
-        SearchInNode(tree, db, board, evaluated, query, query_metric, root + 1, node_end);
+  void push(uint32_t index, score_t score) {
+    if (full()) {
+      uint32_t last = length - 1;
+      if (score < links[last].second) {
+        write(last, index, score);
+        sort();
       }
     } else {
-      SearchInNode(tree, db, board, evaluated, query, query_metric, root + 1, node_end);
-      if (board.not_full() || evaluated < TRESHOLD) {
-        SearchInNode(tree, db, board, evaluated, query, query_metric, node_start, root);
-      }
-    }
-  } else {
-    if (node_start < node_end)
-      evaluated += node_end - node_start;
-    for (uint32_t i = node_start; i < node_end; i++) {
-      TryCandidate(tree, db, board, query, i);
+      write(length++, index, score);
+      sort();
     }
   }
-}
 
-void SearchInTree(Tree& tree, Database& db, Scoreboard& board, Query& query) {
-  score_t query_metric;
-  #ifdef USE_FIRST_METRIC
-    query_metric = first_metric(query);
-  #endif
-  #ifdef USE_SECOND_METRIC
-    query_metric = second_metric(query);
-  #endif
+  uint32_t size() const {
+    return length;
+  }
 
-  uint32_t evaluated = 0;
-  SearchInNode(tree, db, board, evaluated, query, query_metric, 0, tree.length);
-}
+  bool full() const {
+    return length == k_nearest_neighbors;
+  }
 
-inline void TryCandidate(Database& db, Scoreboard& board,
-                         Query& query, uint32_t index) {
-  score_t score = distance(db.records[index], query);
-  board.push(index, score);
-}
-
-void SearchExaustive(Database& db, Scoreboard& board, Query& query) {
-  for (uint32_t i = 0; i < db.length; i++)
-    TryCandidate(db, board, query, i);
-}
-
-struct Solution {
-  uint32_t length;
-  uint32_t* records;
+  void dump() {
+    for (uint32_t i = 0; i < length; i++) {
+      std::cout << " (" << links[i].first << " ; " << links[i].second << ")";
+    }
+  }
 };
 
-void Flush(Solution& solution, Scoreboard& board) {
-  assert (solution.records == nullptr);
-  assert (board.size() > 0);
-  solution = {
-    .length = board.size(),
-    .records = smalloc<uint32_t>(board.size())
-  };
-  uint32_t rank = board.size() - 1;
-  while (board.size() > 0) {
-    solution.records[rank] = board.top().index;
-    board.pop();
-    rank--;
+struct Graph {
+  Links* adiacency;
+  uint32_t length;
+
+  static Graph* New(Database& db) {
+    Links* adiacency = smalloc<Links>(db.length);
+    
+    for (uint32_t i = 0; i < db.length; i++) {
+      adiacency[i].clear();
+    }
+    
+    return new Graph {
+      .adiacency = adiacency,
+      .length = db.length
+    };
   }
-}
 
-void Free(Solution& solution) {
-  free(solution.records);
-  solution.records = nullptr;
-  solution.length = 0;
-}
+  static void Free(Graph* graph) {
+    if (graph != nullptr) {
+      delete graph->adiacency;
+      delete graph;
+    }
+  }
 
-double Recall(const Solution& expected, const Solution& obtained) {
-  double recall = 0;
-  for (uint32_t i = 0; i < obtained.length; i++) {
-    for (uint32_t j = 0; j < expected.length; j++) {
-      if (obtained.records[i] == expected.records[j]) {
-        recall += 1;
+  void fill(const Database& db, const IndexPage& page) {
+    // iterate over rows
+    for (uint32_t i = 0; i < page.length; i++) {
+      const Index& row = *page.indexes[i];
+      uint32_t n_of_partitions = row.length / PARTITION_LENGTH;
+      if (row.length % PARTITION_LENGTH != 0)
+        n_of_partitions++;
+
+      for (uint32_t j = 0; j < n_of_partitions; j++) {
+        uint32_t partition_start = j * PARTITION_LENGTH;
+        uint32_t partition_end = partition_start + PARTITION_LENGTH;
+        for (uint32_t node_a = partition_start; node_a < partition_end; node_a++) {
+          for (uint32_t node_b = node_a + 1; node_b < partition_end; node_b++) {
+            uint32_t index_a = row.indices[node_a];
+            uint32_t index_b = row.indices[node_b];
+
+            if (adiacency[index_a].has(index_b)) {
+              if (adiacency[index_b].has(index_a)) {
+              } else {
+                score_t score = adiacency[index_a].get(index_b).second;
+                adiacency[index_b].push(index_a, score);
+              }
+            } else {
+              if (adiacency[index_b].has(index_a)) {
+                score_t score = adiacency[index_b].get(index_a).second;
+                adiacency[index_a].push(index_b, score);
+              } else {
+                score_t score = distance(db.records[index_a], db.records[index_b]);
+                adiacency[index_a].push(index_b, score);
+                adiacency[index_b].push(index_a, score);
+              }
+            }
+          }
+        }
       }
     }
   }
-  return recall / (double) k_nearest_neighbors;
-}
+
+  void dump() {
+    for (uint32_t i = 0; i < length; i++) {
+      std::cout << i << " :=";
+      adiacency[i].dump();
+      std::cout << std::endl;
+    }
+  }
+};
 
 int main(int argc, char** args) {
+  std::string db_path = "dummy-data.bin";
+  std::string qs_path = "dummy-queries.bin";
+
   if (argc > 1) {
-    TRESHOLD = std::stoi(args[1]) * k_nearest_neighbors;
+    db_path = std::string(args[1]);
+
+    if (argc > 2) {
+      qs_path = std::string(args[2]);
+    }
   }
 
-  uint32_t MAX_QUERIES = 1;
-  if (argc > 2) {
-    MAX_QUERIES = std::stoi(args[2]);
-  }
+  Database db = ReadDatabase(db_path);
+  LogTime("Read DB");
 
-  Database db = ReadDatabase("dummy-data.bin");
-  QuerySet qs = ReadQuerySet("dummy-queries.bin");
+  QuerySet qs = ReadQuerySet(qs_path);
+  LogTime("Read QS");
 
-  Tree tree;
-  BuildTree(tree, db, 0, db.length);
+  IndexPage* page = IndexPage::New(db);
+  LogTime("Built Index Page");
 
-  double recall = 0;
-  uint32_t n_of_queries = std::min(qs.length, MAX_QUERIES);
-  for (uint32_t j = 0; j < n_of_queries; j++) {
-    Query& query = qs.queries[j];
-    Scoreboard board_t;
-    SearchInTree(tree, db, board_t, query);
+  Graph* graph = Graph::New(db);
+  LogTime("Initialized Graph");
 
-    Scoreboard board_e;
-    SearchExaustive(db, board_e, query);
+  graph->fill(db, *page);
+  LogTime("Built Graph");
+  
+  // graph->dump();
+  // LogTime("Dumped Graph");
 
-    Solution expected, obtained;
-    Flush(expected, board_e);
-    Flush(obtained, board_t);
+  IndexPage::Free(page);
+  LogTime("Freed Index Page");
 
-    recall += Recall(expected, obtained);
-
-    Free(expected);
-    Free(obtained);
-    board_t.clear();
-    board_e.clear();
-  }
-  recall /= n_of_queries;
-
-  #ifdef USE_FIRST_METRIC
-    std::cout << "First,";
-  #endif
-  #ifdef USE_SECOND_METRIC
-    std::cout << "Second,";
-  #endif
-  std::cout << db.length << "," << qs.length << "," << n_of_queries << "," << recall << "," << TRESHOLD << std::endl;
+  Graph::Free(graph);
+  LogTime("Freed Graph");
 
   FreeDatabase(db);
+  LogTime("Freed DB");
+
   FreeQuerySet(qs);
+  LogTime("Freed QS");
 }

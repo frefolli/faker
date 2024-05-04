@@ -1,5 +1,5 @@
-#ifndef CONFIG_HH
-#define CONFIG_HH
+#ifndef SIGMOD_CONFIG_HH
+#define SIGMOD_CONFIG_HH
 
 #include <cstdint>
 

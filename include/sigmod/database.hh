@@ -1,5 +1,5 @@
-#ifndef DATABASE_HH
-#define DATABASE_HH
+#ifndef SIGMOD_DATABASE_HH
+#define SIGMOD_DATABASE_HH
 
 #include <sigmod/record.hh>
 #include <string>

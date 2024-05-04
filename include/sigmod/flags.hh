@@ -1,21 +1,11 @@
-#ifndef FLAGS_HH
-#define FLAGS_HH
+#ifndef SIGMOD_FLAGS_HH
+#define SIGMOD_FLAGS_HH
 
 /* FLAGS */
 
-#define USE_FIRST_METRIC
-// #define USE_SECOND_METRIC
+#define ENABLE_OMP
+#define PARTITION_LENGTH 10
 
 /* RULES */
-
-#ifdef USE_FIRST_METRIC
-  #ifdef USE_SECOND_METRIC
-    #error "unable at most one metric"
-  #endif
-#else
-  #ifndef USE_SECOND_METRIC
-    #error "unable at least one metric"
-  #endif
-#endif
 
 #endif

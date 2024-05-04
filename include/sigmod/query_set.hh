@@ -1,5 +1,5 @@
-#ifndef QUERY_SET_HH
-#define QUERY_SET_HH
+#ifndef SIGMOD_QUERY_SET_HH
+#define SIGMOD_QUERY_SET_HH
 
 #include <sigmod/query.hh>
 #include <string>
