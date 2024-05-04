@@ -4,7 +4,7 @@
 /* FLAGS */
 
 #define ENABLE_OMP
-#define PARTITION_LENGTH 10
+#define PARTITION_LENGTH 2
 
 /* RULES */
 

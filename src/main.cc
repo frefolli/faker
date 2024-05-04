@@ -202,6 +202,9 @@ struct Graph {
       if (row.length % PARTITION_LENGTH != 0)
         n_of_partitions++;
 
+      #ifdef ENABLE_OMP
+        #pragma omp parallel for
+      #endif
       for (uint32_t j = 0; j < n_of_partitions; j++) {
         uint32_t partition_start = j * PARTITION_LENGTH;
         uint32_t partition_end = partition_start + PARTITION_LENGTH;
@@ -242,6 +245,8 @@ struct Graph {
 };
 
 int main(int argc, char** args) {
+  omp_set_num_threads(omp_get_max_threads());
+
   std::string db_path = "dummy-data.bin";
   std::string qs_path = "dummy-queries.bin";
 
