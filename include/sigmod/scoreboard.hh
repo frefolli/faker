@@ -31,7 +31,7 @@ inline score_t distance(const WFA& query, const WFB& record) {
 }
 
 inline bool check_if_elegible_by_T(const Query& query, const Record& record) {
-    if (query.query_type == BY_C || query.query_type == NORMAL)
+    if ((uint32_t) query.query_type == BY_C || (uint32_t) query.query_type == NORMAL)
       return true;
     return (query.l <= record.T && query.r >= record.T);
 }

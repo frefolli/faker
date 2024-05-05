@@ -3,16 +3,20 @@
 #include <sigmod/database.hh>
 #include <sigmod/memory.hh>
 #include <sigmod/scoreboard.hh>
+#include <sigmod/random.hh>
 #include <sigmod/flags.hh>
 #include <omp.h>
 #include <algorithm>
 #include <cassert>
+#include <unordered_map>
+#include <map>
+#include <cfloat>
 
 struct Index {
   uint32_t* indices;
   uint32_t length;
 
-  static Index* New(Database& db) {
+  static Index* New(const Database& db) {
     uint32_t* indices = smalloc<uint32_t>(db.length);
     for (uint32_t i = 0; i < db.length; i++) {
       indices[i] = i;
@@ -38,7 +42,7 @@ struct IndexPage {
   Index** indexes;
   uint32_t length;
 
-  static IndexPage* New(Database& db) {
+  static IndexPage* New(const Database& db) {
     Index** indexes = smalloc<Index*>(vector_num_dimension);
 
     #ifdef ENABLE_OMP
@@ -93,7 +97,7 @@ struct IndexPage {
 
 struct Links {
   typedef std::pair<uint32_t, score_t> link_t;
-  link_t links[k_nearest_neighbors];
+  link_t links[LINKS_SIZE];
   uint16_t length;
 
   void clear() {
@@ -174,7 +178,7 @@ struct Graph {
   Links* adiacency;
   uint32_t length;
 
-  static Graph* New(Database& db) {
+  static Graph* New(const Database& db) {
     Links* adiacency = smalloc<Links>(db.length);
     
     for (uint32_t i = 0; i < db.length; i++) {
@@ -208,6 +212,8 @@ struct Graph {
       for (uint32_t j = 0; j < n_of_partitions; j++) {
         uint32_t partition_start = j * PARTITION_LENGTH;
         uint32_t partition_end = partition_start + PARTITION_LENGTH;
+        if (partition_end > row.length)
+          partition_end = row.length;
         for (uint32_t node_a = partition_start; node_a < partition_end; node_a++) {
           for (uint32_t node_b = node_a + 1; node_b < partition_end; node_b++) {
             uint32_t index_a = row.indices[node_a];
@@ -235,7 +241,7 @@ struct Graph {
     }
   }
 
-  void dump() {
+  void dump() const {
     for (uint32_t i = 0; i < length; i++) {
       std::cout << i << " :=";
       adiacency[i].dump();
@@ -243,6 +249,182 @@ struct Graph {
     }
   }
 };
+
+struct TreeNode {
+  enum {LEAF, INTERNAL} type;
+  union {
+    struct {
+      uint32_t start;
+      uint32_t end;
+    } leaf;
+
+    struct {
+      uint32_t dim;
+      uint32_t middle;
+      float32_t sep;
+      TreeNode* left;
+      TreeNode* right;
+    } internal;
+  };
+
+  static TreeNode* New(const Database& db, uint32_t start, uint32_t end, Index& index) {
+    const int64_t length = end - start;
+    if (length > 0) {
+      if (length <= TREE_NODE_SIZE) {
+        return new TreeNode {
+          .type = LEAF,
+          .leaf = {
+            .start = start,
+            .end = end
+          }
+        };
+      } else {
+        uint32_t dim = RandomUINT32T(0, vector_num_dimension);
+        std::sort(index.indices + start, index.indices + end, [&db, &dim](const uint32_t& a, const uint32_t&b) {
+          const Record& A = db.records[a];
+          const Record& B = db.records[b];
+          if (A.fields[dim] != B.fields[dim]) {
+            return A.fields[dim] < B.fields[dim];
+          } else {
+            return a < b;
+          }
+        });
+        uint32_t middle = (start + end) / 2;
+        float32_t sep = db.records[index.indices[middle]].fields[dim];
+
+        uint32_t middle_left = middle;
+        uint32_t middle_right = middle;
+
+        while(middle_left > 0 && db.records[index.indices[middle_left]].fields[dim] == sep) {
+          middle_left--;
+        }
+
+        while(middle_right < end - 1 && db.records[index.indices[middle_right]].fields[dim] == sep) {
+          middle_right++;
+        }
+
+        uint32_t dleft = middle - middle_left;
+        uint32_t dright = middle_right - middle;
+        
+        if (dleft < dright) {
+          middle = middle_left;
+          sep = db.records[index.indices[middle_left]].fields[dim];
+
+        } else {
+          middle = middle_right - 1;
+        }
+
+        TreeNode* left = TreeNode::New(db, start, middle, index);
+        TreeNode* right = TreeNode::New(db, middle + 1, end, index);
+        return new TreeNode {
+          .type = INTERNAL,
+          .internal = {
+            .dim = dim,
+            .middle = middle,
+            .sep = sep,
+            .left = left,
+            .right = right
+          }
+        };
+      }
+    }
+    return new TreeNode {
+      .type = LEAF,
+      .leaf = {
+        .start = 0,
+        .end = 0
+      }
+    };
+  }
+
+  static void Free(TreeNode* tree_node) {
+    if (tree_node != nullptr) {
+      switch (tree_node->type) {
+        case LEAF: break;
+        case INTERNAL: {
+          TreeNode::Free(tree_node->internal.left);
+          TreeNode::Free(tree_node->internal.right);
+        };
+      };
+      sfree(tree_node);
+    }
+  }
+};
+
+struct Tree {
+  Index* index;
+  TreeNode* root;
+
+  static Tree* New(const Database& db) {
+    Index* index = Index::New(db);
+    TreeNode* root = TreeNode::New(db, 0, db.length, *index);
+
+    return new Tree {
+      .index = index,
+      .root = root
+    };
+  }
+  
+  static void Free(Tree* tree) {
+    if (tree != nullptr) {
+      Index::Free(tree->index);
+      tree->index = nullptr;
+      TreeNode::Free(tree->root);
+      tree->root = nullptr;
+      sfree(tree);
+    }
+  }
+
+  inline void try_add(uint32_t& best_fit, score_t& best_score, const uint32_t cand_fit, const score_t cand_score) const {
+    if (cand_score < best_score) {
+      best_score = cand_score;
+      best_fit = cand_fit;
+    }
+  }
+
+  std::pair<uint32_t, score_t> nearest_neighbour(const Database& db, const Query& query) const {
+    uint32_t best_fit = -1;
+    score_t best_score = DBL_MAX;
+
+    TreeNode* node = root;
+    while(node->type != TreeNode::LEAF) {
+      uint32_t middle_index = index->indices[node->internal.middle];
+      score_t middle_score = distance(db.records[middle_index], query);
+      try_add(best_fit, best_score, middle_index, middle_score);
+
+      if (query.fields[node->internal.dim] <= node->internal.sep) {
+        node = node->internal.left;
+      } else {
+        node = node->internal.right;
+      }
+    }
+
+    try_add(best_fit, best_score, node->leaf.start, distance(db.records[index->indices[node->leaf.start]], query));
+    for (uint32_t i = node->leaf.start + 1; i < node->leaf.end; i++) {
+      try_add(best_fit, best_score, index->indices[i], distance(db.records[index->indices[i]], query));
+    }
+    return {best_fit, best_score};
+  }
+};
+
+void Search(const Database& db, const Tree& tree, const Graph& graph, Scoreboard& scoreboard, const Query& query) {
+  std::pair<uint32_t, score_t> best = tree.nearest_neighbour(db, query);
+
+  scoreboard.push(best.first, best.second);
+  const Links& links = graph.adiacency[best.first];
+  for (uint32_t i = 0; i < links.size(); i++) {
+    uint32_t index = links.at(i).first;
+    score_t score = distance(db.records[index], query);
+    scoreboard.push(index, score);
+  }
+}
+
+void Exaustive(const Database& db, Scoreboard& scoreboard, const Query& query) {
+  for (uint32_t index = 0; index < db.length; index++) {
+    score_t score = distance(db.records[index], query);
+    scoreboard.push(index, score);
+  }
+}
 
 int main(int argc, char** args) {
   omp_set_num_threads(omp_get_max_threads());
@@ -273,11 +455,38 @@ int main(int argc, char** args) {
   graph->fill(db, *page);
   LogTime("Built Graph");
   
-  // graph->dump();
-  // LogTime("Dumped Graph");
-
   IndexPage::Free(page);
   LogTime("Freed Index Page");
+
+  Tree* tree = Tree::New(db);
+  LogTime("Built Tree");
+
+  Scoreboard scoreboard;
+  Search(db, *tree, *graph, scoreboard, qs.queries[0]);
+
+  uint32_t rank = scoreboard.size() - 1;
+  while(scoreboard.size() > 0) {
+    std::cout << rank << " := " << scoreboard.top().index << " | " << scoreboard.top().score << std::endl;
+    scoreboard.pop();
+    rank--;
+  }
+
+  LogTime("Graph+Tree");
+
+  scoreboard.clear();
+  Exaustive(db, scoreboard, qs.queries[0]);
+
+  rank = scoreboard.size() - 1;
+  while(scoreboard.size() > 0) {
+    std::cout << rank << " := " << scoreboard.top().index << " | " << scoreboard.top().score << std::endl;
+    scoreboard.pop();
+    rank--;
+  }
+  
+  LogTime("Exaustive");
+
+  Tree::Free(tree);
+  LogTime("Freed Tree");
 
   Graph::Free(graph);
   LogTime("Freed Graph");

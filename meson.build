@@ -5,7 +5,7 @@ project(
   default_options : [
     'warning_level=3',
     'optimization=3',
-    'cpp_std=c++17'
+    'cpp_std=c++20'
   ]
 )
 
